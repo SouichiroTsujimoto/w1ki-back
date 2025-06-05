@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -32,36 +33,77 @@ func toPage(s string, p *Page) {
 	}
 }
 
+type ConnInfo struct {
+	conn *websocket.Conn
+	page string
+}
+
 type WsConns struct {
-	conns map[string]*websocket.Conn
+	conns map[string]ConnInfo
 }
 
 func NewWsConns() *WsConns {
 	return &WsConns{
-		conns: make(map[string]*websocket.Conn),
+		conns: make(map[string]ConnInfo),
 	}
 }
 
-func (c *WsConns) Add(conn *websocket.Conn) string {
+func (c *WsConns) Add(conn *websocket.Conn, title string) string {
 	id := uuid.NewString()
-	c.conns[id] = conn
+	c.conns[id] = ConnInfo{
+		conn,
+		title,
+	}
 
 	return id
 }
 
 func (c *WsConns) Remove(id string) {
-	if conn, ok := c.conns[id]; ok {
+	if connInfo, ok := c.conns[id]; ok {
 		delete(c.conns, id)
-		conn.Close()
+		connInfo.conn.Close()
 	}
 }
 
-func (c *WsConns) SendToOthers(message []byte, myid string) {
-	for id, conn := range c.conns {
+func (c *WsConns) NotifyNewConnection(myid string) {
+	connectionCount := 1
+
+	for id, connInfo := range c.conns {
 		if id == myid {
 			continue
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+		if connInfo.page != c.conns[myid].page {
+			continue
+		}
+		connectionCount++
+		if err := connInfo.conn.WriteMessage(websocket.TextMessage, []byte("NewConnection:")); err != nil {
+			c.Remove(id)
+		}
+	}
+
+	c.SendConnectionsToAll([]byte(strconv.Itoa(connectionCount)), myid)
+}
+
+func (c *WsConns) SendConnectionsToAll(message []byte, myid string) {
+	for id, conninfo := range c.conns {
+		if conninfo.page != c.conns[myid].page {
+			continue
+		}
+		if err := conninfo.conn.WriteMessage(websocket.TextMessage, []byte("Connections:"+string(message))); err != nil {
+			c.Remove(id)
+		}
+	}
+}
+
+func (c *WsConns) SendMessageToOthers(message []byte, myid string) {
+	for id, conninfo := range c.conns {
+		if id == myid {
+			continue
+		}
+		if conninfo.page != c.conns[myid].page {
+			continue
+		}
+		if err := conninfo.conn.WriteMessage(websocket.TextMessage, []byte("Message:"+string(message))); err != nil {
 			c.Remove(id)
 		}
 	}
@@ -79,6 +121,8 @@ func NewSQLiteStorage(db *sql.DB) *SQLiteStorage {
 
 // Get はキーに対応する値を取得します
 func (s *SQLiteStorage) Get(key string) ([]byte, error) {
+	//encodedKey := url.QueryEscape(key)
+
 	var content []byte
 	err := s.db.QueryRow("SELECT content FROM pages WHERE title = ?", key).Scan(&content)
 	if err == sql.ErrNoRows {
@@ -89,6 +133,7 @@ func (s *SQLiteStorage) Get(key string) ([]byte, error) {
 
 // Set はキーに対応する値を設定します
 func (s *SQLiteStorage) Set(key string, val []byte, _ time.Duration) error {
+	//encodedKey := url.QueryEscape(key)
 	// UPSERTを使用してデータを挿入または更新
 	_, err := s.db.Exec(
 		"INSERT INTO pages (title, content, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(title) DO UPDATE SET content = ?, updated_at = CURRENT_TIMESTAMP",
@@ -99,6 +144,8 @@ func (s *SQLiteStorage) Set(key string, val []byte, _ time.Duration) error {
 
 // Delete はキーに対応する値を削除します
 func (s *SQLiteStorage) Delete(key string) error {
+	//encodedKey := url.QueryEscape(key)
+
 	_, err := s.db.Exec("DELETE FROM pages WHERE title = ?", key)
 	return err
 }
@@ -181,15 +228,22 @@ func main() {
 		if err != nil {
 			return err
 		}
-		return c.JSON(keys)
-
+		decodedKeys := make([]string, len(keys))
+		for i, key := range keys {
+			decodedKeys[i], _ = url.QueryUnescape(key)
+		}
+		return c.JSON(decodedKeys)
 	})
 
-	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
-		requestId := wsconns.Add(c)
+	app.Get("/ws/:title", websocket.New(func(c *websocket.Conn) {
+		title := c.Params("title")
+
+		requestId := wsconns.Add(c, title)
 		defer wsconns.Remove(requestId)
 
 		log.Printf("新しいWebSocket接続: %s", requestId)
+
+		wsconns.NotifyNewConnection(requestId)
 
 		for {
 			messageType, message, err := c.ReadMessage()
@@ -205,13 +259,13 @@ func main() {
 
 			if messageType == websocket.TextMessage {
 				log.Printf("メッセージ %s", message)
-				wsconns.SendToOthers(message, requestId)
+				wsconns.SendMessageToOthers(message, requestId)
 			}
 		}
 	}))
 
 	app.Get("/page/:title", func(c *fiber.Ctx) error {
-		title, _ := url.QueryUnescape(c.Params("title"))
+		title := c.Params("title")
 		log.Println(title)
 		page, err := store.Get(title)
 		if err != nil {
@@ -221,18 +275,20 @@ func main() {
 	})
 
 	app.Post("/page/:title", func(c *fiber.Ctx) error {
-		//title := c.Params("title")
+		title := c.Params("title")
 		page := Page{}
 		toPage(string(c.Body()), &page)
 		log.Println(string(c.Body()))
 		log.Println(page.Title)
+		log.Println(url.QueryEscape(page.Title))
+		log.Println(title)
 		log.Println(page.Markdown)
 		log.Println(page.String())
 		//if page.Title != title {
 		//	return fiber.NewError(fiber.StatusBadRequest, "title is not match")
 		//}
 		// 未登録ならdbに登録
-		if err := store.Set(page.Title, []byte(page.Markdown), 0); err != nil {
+		if err := store.Set(title, []byte(page.Markdown), 0); err != nil {
 			return err
 		}
 
@@ -241,7 +297,7 @@ func main() {
 
 	app.Delete("/page/:title", func(c *fiber.Ctx) error {
 		title := c.Params("title")
-		log.Println(title)
+		log.Println("Delete: " + title + "(" + c.Params("title") + ")")
 		if err := store.Delete(title); err != nil {
 			return err
 		}
