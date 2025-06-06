@@ -215,7 +215,7 @@ func main() {
 	})
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     "http://localhost:3000,http://localhost:5173",
+		AllowOrigins:     "https://w1ki-demo.vercel.app/",
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
 		AllowMethods:     "GET, POST, PUT, DELETE, OPTIONS",
 		AllowCredentials: true,
@@ -304,23 +304,6 @@ func main() {
 
 		return c.SendStatus(fiber.StatusOK)
 	})
-
-	// // テスト用のデータ取得エンドポイント
-	// app.Get("/data", func(c *fiber.Ctx) error {
-	// 	data, err := store.Get("mykey")
-	// 	if err != nil {
-	// 		// キーが存在しない場合、Getはnilとnilエラーを返すことがあります。
-	// 		// 他のエラーの場合はエラーを返します。
-	// 		if err.Error() == "key not found" { // エラーメッセージはライブラリによって異なる場合があります
-	// 			return c.SendStatus(fiber.StatusNotFound)
-	// 		}
-	// 		return err
-	// 	}
-	// 	if data == nil {
-	// 		return c.SendStatus(fiber.StatusNotFound)
-	// 	}
-	// 	return c.SendString(string(data))
-	// })
 
 	log.Println("バックエンド: http://localhost:8080")
 	if err := app.Listen(":8080"); err != nil {
